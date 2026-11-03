@@ -1,0 +1,7 @@
+# See: https://github.com/DavidAnson/vscode-markdownlint#configure
+# See: https://github.com/DavidAnson/markdownlint/blob/main/README.md#rules--aliases
+
+line-length: false
+code-block-style: fenced
+no-duplicate-heading:
+  siblings_only: true

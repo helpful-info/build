@@ -1,0 +1,124 @@
+# See: https://docs.github.com/en/actions/reference/workflow-syntax-for-github-actions
+# More specific about composite actions: https://docs.github.com/en/actions/creating-actions/metadata-syntax-for-github-actions
+
+name: 'Build'
+author: '510 an initiative of The Netherlands Red Cross'
+description: 'Builds a HIA-instance.'
+
+branding:
+  icon: 'package'
+  color: 'red'
+
+inputs:
+  publicURL:
+    description: 'The full public URL of the HIA-instance. Should include `https://`. Can contain a sub-directory.'
+    required: false
+    default: ''
+  includePublicFiles:
+    description: 'Whether to include the `public`-folder in the build of the instance.'
+    required: false
+    default: true
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Verify ENV configuration
+      shell: bash
+      if: env.REGIONS_SHEET_IDS == 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'
+      run: |
+        echo "### ⚠️ Missing Google Spreadsheet ID" >> "$GITHUB_STEP_SUMMARY"
+        echo "Set the appropriate Google Spreadsheet ID in \`REGIONS_SHEET_IDS\`, instead of the default/placeholder-value: \`xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\`" >> "$GITHUB_STEP_SUMMARY"
+        echo "Edit [\`.github/workflows/deploy-github-pages.yml\`](../../edit/main/.github/workflows/deploy-github-pages.yml) to fix." >> "$GITHUB_STEP_SUMMARY"
+        echo "::error file=.github/workflows/deploy-github-pages.yml::Please change the ENV configuration to real-world values" && exit 1
+
+    - name: Set up Node.js version
+      uses: actions/setup-node@v7
+      with:
+        node-version-file: 'package.json'
+        cache: 'npm'
+        cache-dependency-path: 'package.json'
+
+    - name: Detect GitHub Pages URL
+      if: inputs.publicURL == ''
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        set -euo pipefail
+        public_url="$(gh api repos/"$GITHUB_REPOSITORY"/pages --jq '.html_url')"
+        echo "HIA_PUBLIC_URL=$public_url" >> "$GITHUB_ENV"
+
+    - name: Use provided public URL
+      if: inputs.publicURL != ''
+      shell: bash
+      env:
+        HIA_PUBLIC_URL: ${{ inputs.publicURL }}
+      run: |
+        echo "The public URL is: $HIA_PUBLIC_URL"
+        echo "HIA_PUBLIC_URL=$HIA_PUBLIC_URL" >> "$GITHUB_ENV"
+
+    - name: 'Decide base-HREF build-flag'
+      shell: bash
+      run: |
+        node --input-type=module <<'EOF'
+        import { appendFileSync } from 'node:fs';
+
+        let baseHref = '';
+        try {
+          const url = new URL(process.env.HIA_PUBLIC_URL ?? "");
+          baseHref = url.pathname;
+        } catch(e) {
+          process.stderr.write(`Error parsing "publicURL": ${e}\n`);
+        }
+
+        // Normalize slashes on the ends of the pathname
+        if (baseHref.endsWith("/")) {
+          baseHref = baseHref.slice(0, -1);
+        }
+        if (baseHref.startsWith("/")) {
+          baseHref = baseHref.slice(1);
+        }
+        const baseHrefFlag = (baseHref !== '') ? `--base-href=/${baseHref}/` : '';
+
+        appendFileSync(process.env.GITHUB_ENV, `BASE_HREF_FLAG=${baseHrefFlag}\n`);
+        EOF
+
+    - name: Install local
+      shell: bash
+      run: |
+        npm install --no-save
+
+    - name: Set-up helpful-information
+      shell: bash
+      run: |
+        mv node_modules/helpful-information ./
+
+    - name: Install helpful-information
+      shell: bash
+      working-directory: 'helpful-information'
+      run: |
+        npm ci --no-fund --no-audit
+      env:
+        HUSKY: 0
+
+    - name: Build
+      shell: bash
+      working-directory: 'helpful-information'
+      env:
+        # See all variables: https://github.com/rodekruis/helpful-information/blob/main/.env.example
+        GOOGLE_SHEETS_API_KEY: '${{ env.GOOGLE_SHEETS_API_KEY }}'
+        GOOGLE_SHEETS_API_URL: ${{ case((env.GOOGLE_SHEETS_API_URL != ''), env.GOOGLE_SHEETS_API_URL, 'https://sheets.googleapis.com/v4/spreadsheets') }}
+        SEARCH_API: ${{ case((env.SEARCH_API != ''), env.SEARCH_API, 'https://hia-search.azurewebsites.net/') }}
+      run: |
+        npm run build:production -- --output-path=../www $BASE_HREF_FLAG
+
+    - name: Add 404.html
+      shell: bash
+      run: |
+        cp www/index.html www/404.html
+
+    - name: Add generic, public files
+      if: inputs.includePublicFiles == 'true'
+      shell: bash
+      run: |
+        cp -R -v public/. www/
